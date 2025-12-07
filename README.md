@@ -1,0 +1,2 @@
+# murdermysteryBOT
+Discordのマダミスサーバーに追加することで自動でサーバーの設定を行ってくれる
