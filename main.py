@@ -199,14 +199,32 @@ async def cast_error(ctx, error):
         await ctx.send("⚠️ **ユーザーが見つかりません**\nメンションを確認してください。")
 
 # ---------------------------------------------------------
-# 機能4：タイマー (!timer)
+# 機能4：タイマー (!timer) - 参加者メンション版
 # ---------------------------------------------------------
 @bot.command()
 async def timer(ctx, minutes: int, *, memo="タイマー"):
     await ctx.send(f"⏳ **{memo}** を開始します！（{minutes}分間）")
     await asyncio.sleep(minutes * 60)
-    await ctx.send(f"⏰ @everyone **{memo}** の {minutes}分が経過しました！")
-
+    
+    # カテゴリー内の役職付きチャンネルを探してメンションを作成
+    mentions = []
+    category = discord.utils.get(ctx.guild.categories, name=CATEGORY_NAME)
+    
+    if category:
+        # 除外するチャンネル名（システム用）
+        ignore_channels = [GM_TEXT_CHANNEL_NAME, GENERAL_TEXT_CHANNEL_NAME]
+        
+        for channel in category.text_channels:
+            if channel.name not in ignore_channels:
+                # チャンネル名と同じロールを探す
+                role = discord.utils.get(ctx.guild.roles, name=channel.name)
+                if role:
+                    mentions.append(role.mention)
+    
+    # メンションの文字列を作成（なければ空白）
+    mention_str = " ".join(mentions) if mentions else ""
+    
+    await ctx.send(f"⏰ {mention_str} **{memo}** の {minutes}分が経過しました！")
 # ---------------------------------------------------------
 # 機能5：集合・移動 (!gather)
 # ---------------------------------------------------------
@@ -298,5 +316,6 @@ async def cleanup(ctx):
             pass
 
     await ctx.send(f"✨ リセット完了！\n部屋 {deleted_channels}個 と、キャラクターロール {deleted_roles}個 を削除しました。")
+
 
 bot.run(TOKEN)
