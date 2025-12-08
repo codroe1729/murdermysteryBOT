@@ -17,7 +17,7 @@ TOKEN = "YOUR_BOT_TOKEN_HERE"      # Botのトークン
 CATEGORY_NAME = "マダミス会場"       # カテゴリー名
 MAIN_VC_NAME = "集合場所"              # 集合場所VC名
 GM_ROLE_NAME = "GM"                # GMロール名
-SUB_GM_ROLE_NAME = "GMsub"         # サブGMロール名
+SUB_GM_ROLE_NAME = "GMサブ"         # サブGMロール名
 GM_TEXT_CHANNEL_NAME = "gm控室"     # GM専用ch（非公開）
 GENERAL_TEXT_CHANNEL_NAME = "全体議論" # 全員用ch（公開）
 SECRET_VC_NAMES = ["密談1", "密談2"]   # 密談用VC（公開）
@@ -199,32 +199,79 @@ async def cast_error(ctx, error):
         await ctx.send("⚠️ **ユーザーが見つかりません**\nメンションを確認してください。")
 
 # ---------------------------------------------------------
-# 機能4：タイマー (!timer) - 参加者メンション版
+# 機能4：タイマー (!timer) - 停止機能付き
 # ---------------------------------------------------------
 @bot.command()
 async def timer(ctx, minutes: int, *, memo="タイマー"):
-    await ctx.send(f"⏳ **{memo}** を開始します！（{minutes}分間）")
-    await asyncio.sleep(minutes * 60)
-    
-    # カテゴリー内の役職付きチャンネルを探してメンションを作成
+    global current_timer_task
+
+    # 既に動いているタイマーがあればキャンセルする
+    if current_timer_task is not None and not current_timer_task.done():
+        current_timer_task.cancel()
+        await ctx.send("⚠️ 前回のタイマーを停止して、新しいタイマーを開始します。")
+
+    # 今回のコマンド（タスク）をグローバル変数に保存
+    current_timer_task = asyncio.current_task()
+
+    # メンション対象の特定
     mentions = []
     category = discord.utils.get(ctx.guild.categories, name=CATEGORY_NAME)
-    
     if category:
-        # 除外するチャンネル名（システム用）
         ignore_channels = [GM_TEXT_CHANNEL_NAME, GENERAL_TEXT_CHANNEL_NAME]
-        
         for channel in category.text_channels:
             if channel.name not in ignore_channels:
-                # チャンネル名と同じロールを探す
                 role = discord.utils.get(ctx.guild.roles, name=channel.name)
                 if role:
                     mentions.append(role.mention)
-    
-    # メンションの文字列を作成（なければ空白）
     mention_str = " ".join(mentions) if mentions else ""
-    
-    await ctx.send(f"⏰ {mention_str} **{memo}** の {minutes}分が経過しました！")
+
+    try:
+        await ctx.send(f"⏳ **{memo}** を開始します！（{minutes}分間）")
+        
+        total_seconds = minutes * 60
+        remaining = total_seconds
+
+        # 4分以上なら「半分」で通知
+        if minutes >= 4:
+            half_seconds = total_seconds / 2
+            await asyncio.sleep(half_seconds)
+            remaining -= half_seconds
+            await ctx.send(f"🔔 {mention_str} **{memo}** 残り {minutes/2}分（折り返し）です！")
+            
+            await asyncio.sleep(remaining - 60)
+            remaining = 60
+            await ctx.send(f"⚠️ {mention_str} **{memo}** 残り 1分です！")
+
+        # 2分以上なら「残り1分」で通知
+        elif minutes >= 2:
+            await asyncio.sleep(remaining - 60)
+            remaining = 60
+            await ctx.send(f"⚠️ {mention_str} **{memo}** 残り 1分です！")
+
+        # 最後の待機
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+        await ctx.send(f"⏰ {mention_str} **{memo}** 終了！ ({minutes}分経過)")
+
+    except asyncio.CancelledError:
+        # !stop でキャンセルされた時にここを通る
+        await ctx.send(f"🛑 **{memo}** を強制停止しました。")
+    finally:
+        current_timer_task = None
+
+# ---------------------------------------------------------
+# 機能4-B：タイマー停止 (!stop) ★追加
+# ---------------------------------------------------------
+@bot.command()
+async def stop(ctx):
+    global current_timer_task
+    if current_timer_task and not current_timer_task.done():
+        current_timer_task.cancel() # タイマー処理に「キャンセル」シグナルを送る
+        # メッセージは !timer 側の except ブロックで表示されます
+    else:
+        await ctx.send("現在動いているタイマーはありません。")
+
 # ---------------------------------------------------------
 # 機能5：集合・移動 (!gather)
 # ---------------------------------------------------------
@@ -273,7 +320,7 @@ async def gather(ctx, minutes: int = 0):
         await ctx.send("（移動対象のプレイヤーはいませんでした）")
 
 # ---------------------------------------------------------
-# 機能6：お片付け (!cleanup)
+# 機能6：お片付け (!cleanup) - ログ削除機能付き
 # ---------------------------------------------------------
 @bot.command()
 async def cleanup(ctx):
@@ -284,15 +331,32 @@ async def cleanup(ctx):
 
     await ctx.send("🗑️ セッション終了処理を開始します...")
 
-    # ★広間(MAIN_VC_NAME)も削除しないリストに追加
+    # 1. ログを削除したいチャンネルの名前リスト
+    # GM控室、全体議論、広間(VCのチャット) を対象にする
+    log_purge_targets = [GM_TEXT_CHANNEL_NAME, GENERAL_TEXT_CHANNEL_NAME, MAIN_VC_NAME]
+
     keep_channels = [GM_TEXT_CHANNEL_NAME, GENERAL_TEXT_CHANNEL_NAME, MAIN_VC_NAME]
     keep_channels.extend(SECRET_VC_NAMES)
 
     roles_to_delete = []
 
+    # テキストチャンネルの処理（削除 or ログ消去）
     for channel in category.text_channels:
+        # 常設チャンネルの場合：削除せず、ログだけ消す
+        if channel.name in log_purge_targets:
+            try:
+                # 履歴を全消去 (limit=Noneで全て)
+                await channel.purge(limit=None)
+                # 完了メッセージを(消した後に)一瞬だけ出す
+                await channel.send("🧹 ログを全消去しました。", delete_after=5)
+            except Exception as e:
+                print(f"ログ削除エラー({channel.name}): {e}")
+            continue # チャンネル自体は消さないのでスキップ
+
+        # その他のチャンネル（キャラ部屋）は削除対象のロールを探して記録
         if channel.name in keep_channels:
             continue
+            
         for target in channel.overwrites:
             if isinstance(target, discord.Role):
                 if target.name in [GM_ROLE_NAME, SUB_GM_ROLE_NAME]: continue
@@ -301,12 +365,26 @@ async def cleanup(ctx):
                 if target not in roles_to_delete:
                     roles_to_delete.append(target)
 
+    # ボイスチャンネルの処理（削除 or ログ消去）
+    for channel in category.voice_channels:
+        # 広間(VC)のテキストチャットも消去する
+        if channel.name in log_purge_targets:
+            try:
+                await channel.purge(limit=None)
+            except:
+                pass # VCにテキストがない場合などは無視
+        
+        if channel.name not in keep_channels:
+            await channel.delete()
+
+    # キャラ部屋（テキスト）の削除
     deleted_channels = 0
-    for channel in category.channels:
+    for channel in category.text_channels:
         if channel.name not in keep_channels:
             await channel.delete()
             deleted_channels += 1
 
+    # ロールの削除
     deleted_roles = 0
     for role in roles_to_delete:
         try:
@@ -315,7 +393,10 @@ async def cleanup(ctx):
         except:
             pass
 
-    await ctx.send(f"✨ リセット完了！\n部屋 {deleted_channels}個 と、キャラクターロール {deleted_roles}個 を削除しました。")
-
+    # 実行元のチャンネルが消えていなければ完了報告
+    try:
+        await ctx.send(f"✨ リセット完了！\n・常設部屋のログを全消去しました。\n・キャラクター部屋 {deleted_channels}個 とロール {deleted_roles}個 を削除しました。")
+    except:
+        pass # もし自分(GM控室)のログを消してしまってメッセージが送れない場合は無視
 
 bot.run(TOKEN)
